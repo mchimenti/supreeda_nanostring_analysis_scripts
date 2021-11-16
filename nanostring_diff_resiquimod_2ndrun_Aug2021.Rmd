@@ -1,0 +1,464 @@
+---
+title: "NanoString NCounter analysis: 2nd Run Resiquimod + Nanosilver vs Normals"
+author: "Michael S Chimenti"
+date: "08.23.21"
+output:
+  html_document:
+    df_print: paged
+---
+
+### Library imports 
+
+```{r, imports, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(NanoStringDiff)
+library(clusterProfiler)
+library(magrittr)
+library(org.Mm.eg.db)
+library(DESeq2)
+library(ggrepel)
+library(kableExtra)
+
+## Volcano Plot
+
+do_vol_plot <- function(df, sig=0.05, fc=0.5, size = 4){
+  
+  df_sig<- df %>% filter(padj < sig)
+  
+  ## genes with labels -- signficant,decreased expression and start with IGF
+  
+  df_label<- df %>% 
+              filter(padj < sig, abs(log2FoldChange) > fc)
+              #mutate(short_id = stringr::str_split(gene_id, "000000") %>% map_chr(.,2))
+  
+  
+  ## plot
+  
+  p <- ggplot(df, aes(log2FoldChange, -log10(padj)))  +
+      geom_point(size=0.8, color="black", alpha=.8) + 
+      geom_point(size=0.8, data=df_sig, aes(log2FoldChange, -log10(padj)), colour="red") +
+       geom_text_repel(size= size, 
+                    colour="black",
+                    segment.size=0.1, 
+                    nudge_x=0.06, 
+                    nudge_y=0.06, 
+                    data=df_label,
+                    aes(log2FoldChange, -log10(padj), label=gene_name), 
+                    max.iter= 200, 
+                    point.padding = 0.15, 
+                    segment.alpha = 1, 
+                    box.padding=.15,
+                    min.segment.length = unit(0.15, 'lines'),size=2.5) +
+    theme(
+      axis.text.x = element_text(size=12),
+      axis.text.y = element_text(size=12),
+      axis.title.x = element_text(size=14, margin = margin(t = 10, r = 0, b = 10, l = 0)),
+      axis.title.y = element_text(size=14, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+      plot.margin =unit(c(.5,.5,.5,.5),"cm"),
+      plot.title = element_text(size = 11)
+    )
+  
+  return (p)
+}
+
+```
+
+### Preprocessing 
+
+NOTE: These files are the second run of the Resiquimod vs normals on the new NanoString instrument.  
+
+Note, I had to preprocess the RCC files at the command line like this: 
+
+
+<!-- #!/bin/bash -->
+
+<!-- files=`find . -type f -name "*.RCC"` -->
+
+<!-- for f in $files  -->
+<!-- do -->
+<!-- echo $f -->
+<!-- cat $f | sed -n '/Code_Summary/,$p' | sed '1d' | sed '\/Code_Summary>/,+4d' > ${f}.csv -->
+<!-- done -->
+
+
+This was done in a bash for loop before import to create CSV files that could be read into R (below).  The 'sed' commands find the section of the RCC files containing the counts data and pulls those out.  
+
+
+```{r, import_RCC}
+
+setwd('~/collab_proj/supreeda/project_nanostring_aug2021/')
+N2r <- readr::read_csv('20210817_31020957050_N2r_01.RCC.csv')
+N3 <- readr::read_csv('20210817_31020957050_N3_02.RCC.csv')
+N4r <- readr::read_csv('20210817_31020957050_N4r_03.RCC.csv')
+N7 <- readr::read_csv('20210817_31020957050_N7_04.RCC.csv')
+N8 <- readr::read_csv('20210817_31020957050_N8_05.RCC.csv')
+N9 <- readr::read_csv('20210817_31020957050_N9_06.RCC.csv')
+R10 <- readr::read_csv('20210817_31020957050_R10_10.RCC.csv')
+R12r <- readr::read_csv('20210817_31020957050_R12r_11.RCC.csv')
+R14 <- readr::read_csv('20210817_31020957050_R14_12.RCC.csv')
+R1 <- readr::read_csv('20210817_31020957050_R1_07.RCC.csv')
+R5 <- readr::read_csv('20210817_31020957050_R5_08.RCC.csv')
+R9r <- readr::read_csv('20210817_31020957050_R9r_09.RCC.csv')
+
+```
+
+The first three columns and their rows should be identical between samples.
+
+### Building the nanoString data object 
+
+Here we build the count matrix and save it as a "csv": 
+
+```{r, build_count_matrix}
+check <- N2r[,1:3]
+df_list <- list(N2r,N3,N4r,N7,N8,N9,R1,R5,R9r,R10,R12r,R14)
+
+counts <- purrr::map_dfc(df_list,
+               ~bind_cols(.[,4])
+               ) %>%
+         bind_cols(check, .)
+         
+colnames(counts) <- c("Code Class","Name", "Accession", "N2r","N3","N4r","N7","N8","N9","R1","R5","R9r","R10","R12r","R14")
+
+readr::write_csv(counts, path = "counts_for_nanostringdiff.csv")
+#Use this function to check for identity between first 3 columns 
+
+# counts <- purrr::map_dfc(.x = df_list, 
+#                          .f = function(df) {
+#                             if (all_equal(check, df[,1:3]))
+#                               bind_cols(df[,4])
+#                          }
+#                         )
+```
+
+Here we import the "csv" file using the "createNanoStringSetFromCsv" function, along with the design: 
+
+```{r, build_nsd}
+path2 <- "~/collab_proj/supreeda/project_nanostring_aug2021/counts_for_nanostringdiff.csv"
+des <- data.frame(group = c("Norm","Norm","Norm","Norm","Norm","Norm","Resi","Resi","Resi","Resi","Resi","Resi"))
+nanoset <- createNanoStringSetFromCsv(path2, header=TRUE, designs=des)
+
+```
+
+### Normalizing the data
+
+```{r, normalization}
+nanoset <- estNormalizationFactors(nanoset)
+PosFactor <- positiveFactor(nanoset)
+HouseFactor <- housekeepingFactor(nanoset) # get housekeeping size factor #
+RawData <- exprs(nanoset) # get raw data #
+
+###
+### Here I try to put in more reasonable negative factors assuming they are row averages of counts at neg controls for each sample
+### The reason I am doing this is because the default NegFactor calculation in the NanoStringDiff packages produces wildly ###inaccurate negative count factors.  
+###
+
+NegFactor <- NanoStringDiff::negativeControl(nanoset) %>% t() %>% as_tibble(rownames = "samples") %>% mutate(mean_all = rowMeans(.[,-1])) %>% purrr::pluck("mean_all")
+names(NegFactor) <- NanoStringDiff::negativeControl(nanoset) %>% t() %>% as_tibble(rownames = "samples") %>% mutate(mean_all = rowMeans(.[,-1])) %>% purrr::pluck("samples")
+
+
+### This func ('glm.LRT') has some serious bugs and takes forever to run.  Maybe just substitute a DESeq object here?  The data are normalized as: https://github.com/Shedimus/NanoStringDiff/blob/master/R/NanoStringDataNormalization.R
+
+NormalizedData <- round((RawData - NegFactor)/(PosFactor * HouseFactor))  
+NormalizedData[NormalizedData < 0] <- 0
+ColName <- colnames(NormalizedData)
+colnames(NormalizedData) <- paste("Normalized", ColName, sep = "") # change column for normalized data #
+```
+
+### DE testing w/ DESeq2
+
+Here, I am substituting the glm implemented in DESeq2 for that of NanoStringDiff owing to bugs in the latter and slow run times.
+
+```{r, DESeq2, warning=FALSE,message=FALSE}
+
+rownames(des) <- colnames(NormalizedData)
+all(rownames(des) == colnames(NormalizedData)) # sanity check
+dds <- DESeqDataSetFromMatrix(countData = NormalizedData, colData = des, design = ~ group)
+dds
+
+dds$group <- relevel(dds$group, ref = "Norm")
+dds <- DESeq(dds)
+res <- results(dds)
+res_tib <- res %>% as_tibble(rownames = "gene_name") %>% arrange(padj) %>% filter(padj < 0.05)
+```
+
+### PCA analysis 
+
+```{r, pca}
+vst <- DESeq2::rlog(dds, blind=FALSE)
+#colnames(vst) <- vst$sample
+```
+
+```{r, PCA_explorer_1, echo=FALSE, dpi = 200, fig.width=9}
+p <- pcaExplorer::pcaplot(vst, intgroup = "group", ellipse = FALSE, text_labels = FALSE, point_size = 4, ntop=500, pcX = 1, pcY = 2)
+p <- p + ggtitle("PCA with sample color by condition, PC1 and PC2")
+show(p)
+```
+
+### Volcano plot 
+
+```{r, volplot, dpi=200, fig.width=7, warning=FALSE, echo=FALSE}
+
+
+res_tib_2 <- res_tib %>% filter(log2FoldChange < 10)
+p <- do_vol_plot(as.data.frame(res_tib_2), size = 3, sig = 0.05, fc = 0.3)
+p <- p + ggtitle("Volcano: Resiquimod vs Normal, red is pval < 0.05, fc > 0.3")
+p
+```
+
+### Write out gene list 
+
+```{r}
+setwd('~/collab_proj/supreeda/project_nanostring_aug2021/')
+write.csv(res_tib_2, "DEGs_Resiq_vs_Norm_padj_5percent.csv")
+
+```
+
+
+
+
+### Comparing first run vs second run DE genes
+
+```{r, comparison, warning=FALSE,message=FALSE}
+res_July <- read.csv("DE_resi_vs_normal_July2021.csv")
+res_July_DE <- res_July %>% filter(padj < 0.05)
+res_Aug_DE <- res_tib_2 %>% filter(padj < 0.05)
+
+library(Vennerable)
+v <- Venn(list(first_run = res_July_DE$gene_name, second_run = res_Aug_DE$gene_name))
+
+plot(v, doWeights = TRUE)
+
+
+```
+
+### Correlation between July and Aug runs 
+
+```{r, DE_correlation, dpi=200}
+ov <- v@IntersectionSets$`11` ### These are the 63 overlapped genes 
+
+logFC_July <- res_July %>% 
+  as_tibble() %>% 
+  filter(gene_name %in% ov) %>% 
+  arrange(gene_name) %>%
+  dplyr::select(c('log2FoldChange', 'gene_name', 'padj'))
+
+logFC_Aug <- res_Aug_DE %>% 
+  as_tibble() %>%
+  filter(gene_name %in% ov) %>% 
+  arrange(gene_name) %>%
+  dplyr::select(c('log2FoldChange', 'gene_name', 'padj'))
+
+df <- left_join(logFC_July, logFC_Aug, by="gene_name") %>% 
+  dplyr::rename(., log2FC_July=log2FoldChange.x) %>%
+  dplyr::rename(., log2FC_Aug=log2FoldChange.y) %>%
+  dplyr::rename(., July_padj = padj.x) %>%
+  dplyr::rename(., Aug_padj = padj.y)
+
+library(ggplot2)
+library(ggpubr)
+p <- ggplot(df, aes(x=log2FC_July, y=log2FC_Aug, color=July_padj)) + geom_point() + geom_smooth(method="lm", se=FALSE)
+p <- p + scale_color_gradient(low="blue",high="red") + stat_cor(method="pearson")
+p <- p + ggtitle("Correlation between logFC of shared DE genes, July and Aug run")
+p
+```
+
+```{r, overall_correlation, dpi=200}
+
+
+logFC_July_ALL <- res_July %>% 
+  as_tibble() %>% 
+  filter(padj < 1) %>%
+  arrange(gene_name) %>%
+  dplyr::select(c('log2FoldChange', 'gene_name', 'padj'))
+
+logFC_Aug_ALL <- res_tib %>% 
+  filter(padj < 1) %>%
+  arrange(gene_name) %>%
+  dplyr::select(c('log2FoldChange', 'gene_name', 'padj'))
+
+df <- left_join(logFC_July_ALL, logFC_Aug_ALL, by="gene_name") %>% 
+  dplyr::rename(., log2FC_July=log2FoldChange.x) %>%
+  dplyr::rename(., log2FC_Aug=log2FoldChange.y) %>%
+  dplyr::rename(., July_padj = padj.x) %>%
+  dplyr::rename(., Aug_padj = padj.y) %>%
+  drop_na()
+
+#library(ggplot2)
+#library(ggpubr)
+p <- ggplot(df, aes(x=log2FC_July, y=log2FC_Aug, color=July_padj)) + geom_point() + geom_smooth(method="lm", se=FALSE)
+p <- p + scale_color_gradient(low="blue",high="red") + stat_cor(method="pearson")
+p <- p + ggtitle("Correlation between logFC of ALL genes, July and Aug run")
+p
+```
+
+### The problem of "NAs"
+
+Roughly 20% of all the genes (~145) measured in the experiment cannot have logFC or adj-p values calculated owing to low or zero count data like these: 
+
+```{r, NA_dropout}
+plotCounts(dds, gene = "Saa1", intgroup="group")
+plotCounts(dds, gene = "Ccl17", intgroup="group")
+```
+
+
+This is happening as a result of normalization.  The background counts from the negative controls are subtracted from the count data for each sample.  In most cases, this results in a count of "0" for low counts, but sometimes one or more samples retain some counts (<100).  In this situation, the algorithm cannot calculate a p-value, so returns "NA".  
+
+It may be preferable to remove these genes from the analysis before creating the DESeq object.
+
+### Pathway enrichment analysis
+
+Here, we will look at over-representation analysis of KEGG pathways and GO terms: 
+
+```{r, clusterProfiler, message=FALSE, warning=FALSE}
+
+DEGs <- res_tib_2 %>% filter(padj < 0.05)
+DEGs_entrez <- bitr(DEGs$gene_name, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Mm.eg.db")
+
+```
+
+#### KEGG enrichment results 
+
+Top 25 KEGG enriched pathways in mouse: 
+
+```{r, res_KEGG, dpi = 200, fig.width=9}
+res_KEGG <- enrichKEGG(gene = DEGs_entrez$ENTREZID, organism = 'mmu', pvalueCutoff = 0.05)
+head(res_KEGG, 25) %>% filter(qvalue < 0.10) %>% kable() %>% kable_styling()
+
+barplot(res_KEGG, showCategory=20, x = "Count")
+
+edox <- setReadable(res_KEGG, 'org.Mm.eg.db', 'ENTREZID')
+p1 <- cnetplot(edox)
+p2 <- cnetplot(edox, categorySize="pvalue")
+p3 <- cnetplot(edox, circular = TRUE, colorEdge = TRUE)
+cowplot::plot_grid(p1, p2, ncol=2, labels=LETTERS[1:2])
+
+p3
+
+```
+
+### Top 25 enriched GO terms (Biological Process)
+
+```{r, enrichGOBP, dpi=200, fig.width=9}
+res_GO_BP <- enrichGO(gene = DEGs_entrez$ENTREZID, OrgDb = org.Mm.eg.db, pvalueCutoff = 0.05, ont = "BP")
+head(res_GO_BP, 25) %>% filter(qvalue < 0.10) %>% kable() %>% kable_styling()
+
+barplot(res_GO_BP, showCategory=20, x = "Count")
+
+edox <- setReadable(res_GO_BP, 'org.Mm.eg.db', 'ENTREZID')
+p1 <- cnetplot(edox)
+p2 <- cnetplot(edox, categorySize="pvalue")
+p3 <- cnetplot(edox, circular = TRUE, colorEdge = TRUE)
+cowplot::plot_grid(p1, p2, ncol=2, labels=LETTERS[1:2])
+
+p3
+
+```
+
+### Top 25 enriched GO terms: Molecular Function
+
+```{r, enrichGOMF, dpi=200, fig.width = 9}
+res_GO_MF <- enrichGO(gene = DEGs_entrez$ENTREZID, OrgDb = org.Mm.eg.db, pvalueCutoff = 0.05, ont = "MF")
+head(res_GO_MF, 25) %>% filter(qvalue < 0.10) %>% kable() %>% kable_styling()
+
+barplot(res_GO_MF, showCategory=20, x = "Count")
+
+edox <- setReadable(res_GO_MF, 'org.Mm.eg.db', 'ENTREZID')
+p1 <- cnetplot(edox)
+p2 <- cnetplot(edox, categorySize="pvalue")
+p3 <- cnetplot(edox, circular = TRUE, colorEdge = TRUE)
+cowplot::plot_grid(p1, p2, ncol=2, labels=LETTERS[1:2])
+
+p3
+```
+
+
+### Analyzing DE changes between subgroups  
+#### Sept 09, 2021 Update 
+
+The naïve groups (all the sample dub as N) and two subgroups of the treatment. The two subgroups were 'the responder' (R1, R9, and R10), and 'the non-responder' group (R5, R12, and R14).
+
+sample order:  ("N2r","N3","N4r","N7","N8","N9","R1","R5","R9r","R10","R12r","R14")
+
+```{r, build_nsd2}
+path2 <- "~/collab_proj/supreeda/project_nanostring_aug2021/counts_for_nanostringdiff.csv"
+des <- data.frame(group = c("Norm","Norm","Norm","Norm","Norm","Norm","Res","NonRes","Res","Res","NonRes","NonRes"))
+nanoset <- createNanoStringSetFromCsv(path2, header=TRUE, designs=des)
+
+```
+
+### Normalizing the data
+
+```{r, normalization2}
+nanoset <- estNormalizationFactors(nanoset)
+PosFactor <- positiveFactor(nanoset)
+HouseFactor <- housekeepingFactor(nanoset) # get housekeeping size factor #
+RawData <- exprs(nanoset) # get raw data #
+
+NegFactor <- NanoStringDiff::negativeControl(nanoset) %>% t() %>% as_tibble(rownames = "samples") %>% mutate(mean_all = rowMeans(.[,-1])) %>% purrr::pluck("mean_all")
+names(NegFactor) <- NanoStringDiff::negativeControl(nanoset) %>% t() %>% as_tibble(rownames = "samples") %>% mutate(mean_all = rowMeans(.[,-1])) %>% purrr::pluck("samples")
+
+NormalizedData <- round((RawData - NegFactor)/(PosFactor * HouseFactor))  
+NormalizedData[NormalizedData < 0] <- 0
+ColName <- colnames(NormalizedData)
+colnames(NormalizedData) <- paste("Normalized", ColName, sep = "") # change column for normalized data #
+```
+
+### DE testing w/ DESeq2
+
+Here, I am substituting the glm implemented in DESeq2 for that of NanoStringDiff owing to bugs in the latter and slow run times.
+
+```{r, DESeq2_2, warning=FALSE,message=FALSE}
+
+rownames(des) <- colnames(NormalizedData)
+all(rownames(des) == colnames(NormalizedData)) # sanity check
+dds <- DESeqDataSetFromMatrix(countData = NormalizedData, colData = des, design = ~ group)
+dds
+
+dds$group <- relevel(dds$group, ref = "Norm")
+dds <- DESeq(dds)
+
+
+### VST transform
+vst <- DESeq2::rlog(dds, blind=FALSE)
+#colnames(vst) <- vst$sample
+```
+
+```{r, PCA_explorer_2, echo=FALSE, dpi = 200, fig.width=9}
+p <- pcaExplorer::pcaplot(vst, intgroup = "group", ellipse = FALSE, text_labels = FALSE, point_size = 4, ntop=500, pcX = 1, pcY = 2)
+p <- p + ggtitle("PCA with sample color by condition, PC1 and PC2")
+show(p)
+```
+
+```{r, results2}
+res_Res_Norm <- results(dds, contrast = c("group","Res","Norm"))
+res_NonRes_Norm <- results(dds, contrast = c("group", "NonRes","Norm"))
+res_Res_NonRes <- results(dds, contrast = c("group", "Res","NonRes"))
+
+res_Res_Norm_tib <- res_Res_Norm %>% as_tibble(rownames = "gene_name") %>% arrange(padj) %>% filter(padj < 0.05)
+res_NonRes_Norm_tib <- res_NonRes_Norm %>% as_tibble(rownames = "gene_name") %>% arrange(padj) %>% filter(padj < 0.05)
+res_Res_NonRes_tib <- res_Res_NonRes %>% as_tibble(rownames = "gene_name") %>% arrange(padj) %>% filter(padj < 0.05)
+
+setwd('~/collab_proj/supreeda/project_nanostring_aug2021/')
+write.csv(res_NonRes_Norm_tib, "DEGs_NonRes_vs_Norm_padj_5percent.csv")
+write.csv(res_Res_Norm_tib, "DEGs_Res_vs_Norm_padj_5percent.csv")
+write.csv(res_Res_NonRes_tib, "DEGs_Res_vs_NonResp_padj_5percent.csv")
+
+```
+
+### Comparing Responders vs Non-Responders 
+
+```{r, comparison2, warning=FALSE,message=FALSE}
+
+
+library(Vennerable)
+v <- Venn(list(resp_vs_norm = res_Res_Norm_tib$gene_name, nonresp_v_norm = res_NonRes_Norm_tib$gene_name, resp_vs_nonresp = res_Res_NonRes_tib$gene_name))
+
+plot(v, doWeights = TRUE)
+
+
+```
+
+```{r, seshInfo}
+sessionInfo()
+```
+
