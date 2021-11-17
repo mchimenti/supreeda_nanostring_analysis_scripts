@@ -18,6 +18,13 @@ library(org.Mm.eg.db)
 library(DESeq2)
 library(ggrepel)
 library(kableExtra)
+library(pcaExplorer)
+library(Vennerable)
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#   install.packages("BiocManager")
+
+#BiocManager::install("NanoStringDiff")
 
 ## Volcano Plot
 
@@ -84,7 +91,7 @@ Note, I had to preprocess the RCC files at the command line like this:
 This was done in a bash for loop before import to create CSV files that could be read into R (below).  The 'sed' commands find the section of the RCC files containing the counts data and pulls those out.  
 
 
-```{r, import_RCC}
+```{r, import_RCC, message=FALSE,warning=FALSE, eval=FALSE}
 
 setwd('~/collab_proj/supreeda/project_nanostring_aug2021/')
 N2r <- readr::read_csv('20210817_31020957050_N2r_01.RCC.csv')
@@ -108,7 +115,7 @@ The first three columns and their rows should be identical between samples.
 
 Here we build the count matrix and save it as a "csv": 
 
-```{r, build_count_matrix}
+```{r, build_count_matrix, eval=FALSE}
 check <- N2r[,1:3]
 df_list <- list(N2r,N3,N4r,N7,N8,N9,R1,R5,R9r,R10,R12r,R14)
 
@@ -207,27 +214,25 @@ p
 
 ### Write out gene list 
 
-```{r}
+```{r, eval=FALSE}
 setwd('~/collab_proj/supreeda/project_nanostring_aug2021/')
 write.csv(res_tib_2, "DEGs_Resiq_vs_Norm_padj_5percent.csv")
 
 ```
 
 
-
-
 ### Comparing first run vs second run DE genes
 
 ```{r, comparison, warning=FALSE,message=FALSE}
+setwd('~/collab_proj/supreeda/project_nanostring_aug2021/')
 res_July <- read.csv("DE_resi_vs_normal_July2021.csv")
 res_July_DE <- res_July %>% filter(padj < 0.05)
 res_Aug_DE <- res_tib_2 %>% filter(padj < 0.05)
 
-library(Vennerable)
+
 v <- Venn(list(first_run = res_July_DE$gene_name, second_run = res_Aug_DE$gene_name))
 
 plot(v, doWeights = TRUE)
-
 
 ```
 
@@ -320,10 +325,117 @@ DEGs_entrez <- bitr(DEGs$gene_name, fromType="SYMBOL", toType="ENTREZID", OrgDb=
 
 Top 25 KEGG enriched pathways in mouse: 
 
-```{r, res_KEGG, dpi = 200, fig.width=9}
+```{r, res_KEGG}
 res_KEGG <- enrichKEGG(gene = DEGs_entrez$ENTREZID, organism = 'mmu', pvalueCutoff = 0.05)
 head(res_KEGG, 25) %>% filter(qvalue < 0.10) %>% kable() %>% kable_styling()
 
+## Drilling down into specific pathways of interest: 
+colnames(DEGs_entrez) <- c("gene_name", "entrez")                        
+DEGs <- left_join(DEGs, DEGs_entrez, by="gene_name")
+
+tlr_genes <- res_KEGG %>% as_tibble() %>%
+  filter(Description == "Toll-like receptor signaling pathway") %>%
+  dplyr::select(., geneID) %>%
+  str_split(., pattern='/') %>%
+  unlist()
+                                                                                                                                                  
+apop_genes <- res_KEGG %>% as_tibble() %>%
+  filter(Description == "Apoptosis") %>%
+  dplyr::select(., geneID) %>%
+  str_split(., pattern='/') %>%
+  unlist()    
+
+mapk_genes <- res_KEGG %>% as_tibble() %>%
+  filter(Description == "MAPK signaling pathway") %>%
+  dplyr::select(., geneID) %>%
+  str_split(., pattern='/') %>%
+  unlist()    
+
+tlr_tib <- DEGs %>% filter(., entrez %in% tlr_genes)
+apop_tib <- DEGs %>% filter(., entrez %in% apop_genes)
+mapk_tib <- DEGs %>% filter(., entrez %in% mapk_genes)
+
+tlr_tib
+apop_tib
+mapk_tib
+
+#setwd('~/collab_proj/supreeda/project_nanostring_aug2021/')
+#readr::write_csv(x=tlr_tib, file="Toll_Like_DEgenes_2ndRun.csv")
+#readr::write_csv(x=apop_tib, file="Apop_DEgenes_2ndRun.csv")
+#readr::write_csv(x=mapk_tib, file="MapK_DEgenes_2ndRun.csv")
+```
+
+Additional requests from Supreeda (Nov 15): 
+
+ 1. A table of genes involved in the TLR and apoptosis pathways (see line 363 above)
+ 2. Methods section write up w/ references
+ 3. Bar graphs showing groups of genes that are significantly different between the treated and non groups? 
+ 4. Heatmap of top DE genes 
+ 
+```{r, DEGreport, dpi=200, fig.width=9,fig.height=9}
+library(DEGreport)
+resp = c("Norm","Norm","Norm","Norm","Norm","Norm","Res","NonRes","Res","Res","NonRes","NonRes")
+dds$resp <- resp
+DEGreport::degPlot(dds = dds, xs = "group", res = res, n = 56, group = "resp")
+```
+
+From Supreeda: 
+The naïve groups (all the sample dub as N)
+The two treatment subgroups were 'the responder' (R1, R9, and R10)
+The 'non-responder' group (R5, R12, and R14).
+
+```{r, plot_combo_heatmap, dpi =200, fig.height=9,fig.width=9}
+library(pheatmap)
+library(RColorBrewer)
+library(viridis)
+
+
+annot <- colData(vst)
+resp <- data.frame(group = c("Norm","Norm","Norm","Norm","Norm","Norm","Res","NonRes","Res","Res","NonRes","NonRes"))  ## Annotation Columns
+rownames(resp) <- colnames(dds)
+
+## Setup quantile breaks
+quantile_breaks <- function(xs, n = 10) {
+  breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
+  breaks[!duplicated(breaks)]
+}
+
+rld <- rlog(dds)
+#mat <- assay(rld)
+mat <- assay(vst)
+mat_breaks <- quantile_breaks(mat, n = 11)  ## quantile breaks
+#mat_breaks <- seq(min(mat), max(mat), length.out = 10)  ## linear breaks
+
+#mat_colors <- list(sample = brewer.pal(3, "Set2"), GO_Terms = brewer.pal(6, "Set1"))
+#names(mat_colors$sample) <- c("NK_Naive", "NK_PBMC", "NK_TCell_Dep")
+#names(mat_colors$GO_Terms) <- c("Cell_Comm", "Resp_to_Stim", "Cell_Div", "Cell_Cyc", "Chrom_Seg", "Cell_Prolif")
+
+mat2 <- mat %>% as_tibble(rownames = "gene_name") %>%
+  filter(gene_name %in% res_tib_2$gene_name[1:50])
+
+p <- pheatmap(as.matrix(mat2[,-1]), 
+         labels_row = mat2$gene_name,
+         #reaks = mat_breaks,
+         annotation_col = resp,
+         labels_col = colnames(mat2[,-1]),
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         color = inferno(11),
+         fontsize_row = 7
+         )
+
+p
+
+#setwd('~/collab_proj/supreeda/project_nanostring_aug2021/')
+#ggsave(file = "heatmap_top50_DEGs_inferno.pdf", plot=p, dev = "pdf")
+
+```
+
+
+
+```{r, plots_KEGG, dpi=200, fig.width=9}
 barplot(res_KEGG, showCategory=20, x = "Count")
 
 edox <- setReadable(res_KEGG, 'org.Mm.eg.db', 'ENTREZID')
@@ -457,6 +569,9 @@ plot(v, doWeights = TRUE)
 
 
 ```
+
+
+
 
 ```{r, seshInfo}
 sessionInfo()
