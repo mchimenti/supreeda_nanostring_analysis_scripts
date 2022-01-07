@@ -443,7 +443,9 @@ Cancer progression: p53, TFG-B, GSK3, ErbB
 ```{r, plots_KEGG, dpi=200, fig.width=9}
 
 pathways_of_int <- c("Toll-like receptor signaling pathway","Apoptosis","NF-kappa B signaling pathway","IL-17 signaling pathway","Th17 cell differentiation","PD-L1 expression and PD-1 checkpoint pathway in cancer","B cell receptor signaling pathway","Autophagy - animal","T cell receptor signaling pathway","PI3K-Akt signaling pathway","ErbB signaling pathway")
-dotplot(res_KEGG, showCategory=pathways_of_int, x = "Count")
+
+pathways_of_int2 <- c("TNF signaling pathway", "Toll-like receptor signaling pathway","NF-kappa B signaling pathway","IL-17 signaling pathway","MAPK signaling pathway", "Apoptosis", "Th17 cell differentiation","Natural killer cell mediated cytotoxicity", "PD-L1 expression and PD-1 checkpoint pathway in cancer")
+dotplot(res_KEGG, showCategory=pathways_of_int2, x = "Count")
 
 edox <- setReadable(res_KEGG, 'org.Mm.eg.db', 'ENTREZID')
 p1 <- enrichplot::cnetplot(x = edox, showCategory = pathways_of_int[1:5], colorEdge = TRUE)
@@ -456,7 +458,7 @@ p3 <- cowplot::plot_grid(p1, p2, ncol=2, labels=LETTERS[1:2])
 ### Top 25 enriched GO terms (Biological Process)
 
 ```{r, enrichGOBP, dpi=200, fig.width=9}
-res_GO_BP <- enrichGO(gene = DEGs_entrez$ENTREZID, OrgDb = org.Mm.eg.db, pvalueCutoff = 0.05, ont = "BP")
+res_GO_BP <- enrichGO(gene = DEGs_entrez$entrez, OrgDb = org.Mm.eg.db, pvalueCutoff = 0.05, ont = "BP")
 head(res_GO_BP, 25) %>% filter(qvalue < 0.10) %>% kable() %>% kable_styling()
 
 barplot(res_GO_BP, showCategory=20, x = "Count")
